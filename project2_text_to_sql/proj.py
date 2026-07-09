@@ -28,6 +28,7 @@ class state(TypedDict):
     result : list
     counter :int
     break_:bool
+
     
 def get_schema():
     db_path = r"C:\Users\ADIL TRADERS\Desktop\agentic_learn\Learning_agents\project2_text_to_sql\company.db"
@@ -63,45 +64,76 @@ def QueryGenrator(state):
     prev_query  =state["genrated_qry"][-1] if state["genrated_qry"] else ""
     sys_msg = SystemMessage(content = f"You are an expert Database Manager.Your task is to write correct and optimized sql queries for the database with following schema :{schema}")
     hmn_msg = HumanMessage(
-    content=f"""
-        You are an expert SQLite query generator.
+        content=f"""
+    You are an expert SQLite query generator.
 
-        ## Database Schema
-        {schema}
+    ## Database Schema
+    {schema}
 
-        ## User Request
-        {state["query"]}
+    ## User Request
+    {state["query"]}
 
-        ## Instructions
-        1. Carefully understand the database schema.
-        2. Think step by step about which tables and columns are required.
-        3. Generate a correct and efficient SQLite query.
-        4. Only use tables and columns that exist in the schema.
-        5. Do not make assumptions or invent columns.
-        6. Optimize the query where possible.
+    ## Previous Query (if any)
+    {prev_query}
 
-        ## Previous Attempt (if any)
-        Query:
-        {prev_query}
+    ## Validation Status
+    {state["un_correct_query"]}
 
-        Validation Status:
-        {state["un_correct_query"]}
+    ## Validation Feedback
+    {state["issue_with_query"]}
 
-        Validation Feedback:
-        {state["issue_with_query"]}
+    ## Review Feedback
+    {state["feeback"]}
 
-        Additional Feedback:
-        {state["feeback"]}
+    ## Instructions
 
-        ## Task
-        - If `Validation Status` indicates the previous query is incorrect, fix the previous query using all of the feedback provided.
-        - Otherwise, generate a new SQL query from scratch based on the user's request.
+    Carefully analyze the database schema before writing any SQL.
 
-        ## Output
-        Return ONLY the SQL query.
-        Do not include explanations, markdown, or code fences.
-        """
-        )
+    Depending on the situation, perform ONE of the following:
+
+    ### Case 1: No previous query
+    Generate a new SQL query that satisfies the user's request.
+
+    ### Case 2: Previous query is incorrect
+    If Validation Status indicates the query is incorrect:
+    - Fix the query using ALL validation feedback.
+    - Correct syntax errors.
+    - Correct joins.
+    - Correct table or column names.
+    - Correct filters, grouping, ordering, or aggregations.
+    - Ensure the final query satisfies the user's request.
+
+    ### Case 3: Previous query is correct but reviewer suggests improvements
+    If the previous query is valid but the feedback indicates:
+    - missing required data,
+    - incomplete results,
+    - unnecessary joins,
+    - inefficient logic,
+    - possible optimization,
+    - or any other improvement,
+
+    then modify the previous query accordingly while preserving correctness.
+
+    ## General Rules
+
+    - Only use tables and columns present in the schema.
+    - Never invent tables or columns.
+    - Produce an efficient SQLite query.
+    - Avoid unnecessary joins or subqueries.
+    - Return complete results that satisfy the user's request.
+    - If multiple improvements are suggested, apply all of them.
+
+    ## Output
+
+    Return ONLY the final SQL query.
+
+    Do NOT include:
+    - explanations
+    - markdown
+    - code fences
+    - comments
+    """
+    )
     model =  load_model()
     result = model.invoke([sys_msg , hmn_msg])
     print(result.content)
@@ -135,32 +167,130 @@ def query_Debugger(state):
 def router(state):
     if state["un_correct_query"]:
         return "query_debug"
-    return "end_"
+    return "evaluator"
 def break_cond(state):
     if  not state["break_"]:
         return "query_exec"
 def end_(state):
     return {"result":state["fetched_data"][-1]}
+from pydantic import BaseModel , Field
+from typing import Literal
+from typing import Literal
+from pydantic import BaseModel, Field
+
+class Eval(BaseModel):
+    feedback: str = Field(
+        description=(
+            "If improvements are needed, provide concise and specific feedback "
+            "explaining what should be changed in the SQL query. "
+            "If no improvements are needed, return an empty string."
+        )
+    )
+
+    need_imp: Literal["Yes", "No"] = Field(
+        description=(
+            "Return 'Yes' if the SQL query needs any modification, including "
+            "correctness, completeness of results, or query optimization. "
+            "Otherwise, return 'No'."
+        )
+    )  
+def query_evaluator(state):
+    sy = SystemMessage(content = f"You are an expert Sql query Evaluator.You See , analyize and optimize the sql queries for the given schema \n {get_schema()}")
+    hu = HumanMessage(
+        content=f"""
+    You are reviewing a generated SQLite query.
+
+    ## User Request
+    {state["query"]}
+
+    ## Generated SQL
+    {state["genrated_qry"][-1]}
+
+    ## Query Result
+    {state["fetched_data"][-1]}
+
+    Analyze step by step.
+
+    Answer the following:
+
+    1. Does the returned data completely satisfy the user's request?
+    Answer: Yes or No.
+
+    2. If No, explain exactly what information is missing or incorrect.
+
+    3. Is the SQL query logically correct?
+    Answer: Yes or No.
+
+    4. Can the SQL query be optimized?
+    Consider:
+    - unnecessary joins
+    - unnecessary subqueries
+    - redundant conditions
+    - inefficient filtering
+    - better aggregation
+    - simpler SQL
+
+    5. Should the SQL query be modified for ANY reason
+    (correctness, completeness, or optimization)?
+
+    Answer ONLY:
+    Yes
+    or
+    No
+
+    6. If the answer to (5) is Yes, provide concise feedback describing every required change.
+    """
+    )
+    model =  load_model()
+    ev_model  = model.with_structured_output(Eval)
+    
+    res = ev_model.invoke([sy , hu])
+    if (res.need_imp).lower()== "yes":
+        return{
+            "break_":True,
+            "feedback" : res.feedback
+            
+        }
+    return{
+        "break_":False,
+        "feedback" : res.feedback
+    }
+        
+def need_optimization(state):
+    if state["break_"]:
+        return "end_"
+    return  "query_genrator"
     
 graph = StateGraph(state)
-graph.add_node("query_genrator"  , QueryGenrator)
+policy = RetryPolicy(max_attempts=4)
+graph.add_node("query_genrator"  , QueryGenrator , retry_policy=policy)
 graph.add_node("query_exec" , query_exec)
-graph.add_node("query_debug" , query_Debugger)
+graph.add_node("query_debug" , query_Debugger , retry_policy=policy)
 graph.add_node("end_" , end_)
+graph.add_node("evaluator" ,query_evaluator,retry_policy=policy)
 graph.add_edge(START , "query_genrator")
 graph.add_conditional_edges("query_genrator" , break_cond , {"query_exec":"query_exec" , END:END})
-# graph.add_edge("query_genrator" , "query_exec")
-graph.add_conditional_edges("query_exec" , router ,{"query_debug" : "query_debug", "end_":"end_"})
+graph.add_conditional_edges("query_exec" , router ,{"query_debug" : "query_debug", "evaluator":"evaluator"})
+graph.add_conditional_edges("evaluator" ,need_optimization  ,{"end_":"end_" ,"query_genrator":"query_genrator" })
 graph.add_edge("query_debug" , "query_genrator")
 graph.add_edge("end_" , END)
 workflow =  graph.compile()
-query ="""Show me all completed orders from customers based in Karachi, including who handled each order, sorted by amount from highest to lowest."""
-query = {"query":query ,"un_correct_query":False , "issue_with_query" : "" ,"feeback":"" , "counter":0 , "break_":False}
-res = workflow.invoke(query)
-if len(res["result"])>0:
-    for i in res["result"]:
-        print(i)
-else:
-    print("LLM Fails to write efficient query")
-    
-    
+# query ="""Show me all completed orders from customers based in Karachi, including who handled each order, sorted by amount from highest to lowest."""
+
+Q = ["Which employees have never handled an order?" ,"List employees who earn more than the average salary in their own department","Show total completed order revenue grouped by department, ordered highest to lowest.","For each employee, show their single largest order — only for employees who have at least one order","How many orders were placed each month in 2024, and what was the total revenue for each month?"]
+
+
+for qry in Q:  
+    print(f"\n {qry} \n")  
+    try :
+        query = {"query":qry ,"un_correct_query":False , "issue_with_query" : "" ,"feeback":"" , "counter":0 , "break_":False}
+
+        res = workflow.invoke(query)
+
+        if len(res["result"])>0:
+            for i in res["result"]:
+                print(i)
+        else:
+            print("LLM Fails to write efficient query")
+    except Exception as e:
+        print(str(e))    
