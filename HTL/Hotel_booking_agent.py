@@ -124,7 +124,7 @@ tool_node = ToolNode([HumanInTheLoop, hotel_search])
 
 graph = StateGraph(State)
 graph.add_node("user_query", user_query, retry_policy=policy)
-graph.add_node("tool_node", tool_node)
+graph.add_node("tool_node", tool_node ,retry_policy=policy)
 graph.add_node("make_res", make_res, retry_policy=policy)
 graph.add_node("confirm_booking", confirm_booking, retry_policy=policy)
 
@@ -150,7 +150,6 @@ graph.add_conditional_edges(
 
 memory = InMemorySaver()
 workflow = graph.compile(checkpointer=memory)
-
 
 # ---------- display helper ----------
 
